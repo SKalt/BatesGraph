@@ -87,7 +87,8 @@ def get_all_available_courses(url_list):
                 courses[code]["name"] = name
                 courses[code]["concentrations"] = concentrations
                 courses[code]["description"] = desc
-                courses[code]["url"] = "<a href='" + url_temp + "'> LINK </a>"
+                courses[code]["url"] = "<a href='https://" + url_temp + \
+                                        "'> LINK </a>"
                 if "departments" not in courses[code].keys():
                     courses[code]["departments"] = [url.split('Dept&d=')[1]]
                 else:
@@ -296,9 +297,10 @@ if __name__ == "__main__":
     # TODO: rewrite to overwrite last semester
     G = make_course_graph(COURSES, EL)
     DEPTS = []
-    for code in COURSES:
-        DEPTS += COURSES[code]["departments"]
-    DEPTS = list(set(DEPTS))
-    for dept in DEPTS:
-        print(dept)
-        export_json(dept, COURSES, G)
+    #%%
+for code in COURSES:
+    DEPTS += COURSES[code]["departments"]
+DEPTS = list(set(DEPTS))
+for dept in DEPTS:
+    print(dept)
+    export_json(dept, COURSES, G)
