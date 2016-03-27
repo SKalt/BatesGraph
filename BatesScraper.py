@@ -140,7 +140,7 @@ def make_course_graph(courses, el):
     return(g)
     
 def make_sugiyama_layout(g):
-    lyt = g.layout_sugiyama(hgap=10, vgap=100, maxiter=1000)
+    lyt = g.layout_sugiyama(hgap=10, vgap=10, maxiter=1000)
     return(lyt)
 
 def export_all_json(all_course_details):
