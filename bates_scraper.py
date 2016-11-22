@@ -18,7 +18,8 @@ import json
 import shutil
 import os
 from random import randint
-
+import sqlite3
+#%%
 # extra tools
 #def ExploreElement(e):
 #    """
@@ -27,28 +28,96 @@ from random import randint
 #    e: ElementTree element
 #    """
 #    print(html.etree.tostring(e, pretty_print=True).decode('UTF-8'))
-    
-def get_page(url):
+
+def get_years():
     """
-    takes a URL and returns an ElmentTree object
-    Args:
-    url: url string
+    Gets the urls of splash pages for all years after 2013-14
+    Returns:
+        A list of strings in the format '?s=query' indicating catalog years
     """
-    page = http.request("GET", url).data
-    tree = html.parse(BytesIO(page))
-    return(tree)
-    
+    page = html.parse('http://www.bates.edu/catalog/?s=1000&a=catalogList')
+    links = page.xpath('//*[@id="catmenu"]//a')
+    results = []
+    for a in links:
+        year = int(a.text.strip()[:4])
+        if year > 2012:
+            results.append(a.attrib['href'])
+    return results
+
+def map_years():
+    "returns a dict mapping urlencoded year queries to academic year strs"
+    page = html.parse('http://www.bates.edu/catalog/?s=1000&a=catalogList')
+    links = page.xpath('//*[@id="catmenu"]//a')
+    return {i.attrib['href']:i.text[:9] for i in links}
+
+#%%    
 # main functions in approximate order of their usage
-def get_dept_urls():
-    x1 = '//*[@id="deptList"]/div/li/a/@href'
-    url = 'http://www.bates.edu/catalog/?s=current&a=renderStatic&c=courses'
-    tree = get_page(url)
-    url_list = ['www.bates.edu/catalog/' + x for x in tree.xpath(x1)]
-    # add last year's classes
-    url_list += [x.replace("s=current", "s=1000" ) for x in url_list]
-    return(url_list)
+def get_dept_extensions():
+    """
+    Returns a urlencoded queries specifying departments
+    """
+    find_links = '//*[@id="deptList"]/div/li/a/@href'
+    url = 'http://www.bates.edu/catalog/?s=current'
+    tree = html.parse(url)
+    return [href.replace('?s=current', '') for href in tree.xpath(find_links)]
+    
+#%%
+def generate_dept_pages():
+    """
+    Generates a complete list of urls to scrape
+    """
+    years = get_years()
+    dept_extensions = get_dept_extensions()
+    results = []
+    for year in years:
+        for dept in dept_extensions:
+            results.append('http://www.bates.edu/catalog/' + year + dept)
+    return results
+#%%
+def db_exists():
+    return os.path.isfile('bates_courses.db')
+def setup_db():
+    conn = sqlite3.connect('bates_courses.db')
+    cur = conn.cursor()
+    cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS pages_crawled (url text PRIMARY KEY);
+    """
+    )
+    cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS courses(
+        code text,
+        title text,
+        description text,
+        date text,
+        url text PRIMARY KEY
+        );
+    """
+    )
+    cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS concentrations(
+        code text,
+        date text,
+        concentration text
+        );
+    """
+    )
+    cur.execute()
 
 
+def scrape_page(url):
+    """
+    Returns a list of dicts describing courses w/in the dept page
+    """
+    page = html.parse(url)
+    courses = page.xpath('//*[@class="Course"]')
+    def scrape_class(div):
+        
+        
+        
+    
 def get_all_available_courses(url_list):
     """
     scrapes course information from the bates website;
@@ -70,7 +139,7 @@ def get_all_available_courses(url_list):
     crosslistings = []
     
     for url in url_list:
-        tree = get_page(url)
+        tree = html.parse(url)
         courseList = tree.xpath('//*[@id="col0"]/div[@class="Course"]')
         for course in courseList:
             name = course.xpath('./h4[@class="crsname"]/text()')[0]
