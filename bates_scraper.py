@@ -5,37 +5,24 @@ Created on Thu Dec 24 12:27:32 2015
 @author: steven
 """
 
-# 
 # import block
-import urllib3 as ul
-ul.disable_warnings()
 from lxml import html
-http = ul.PoolManager()
-from io import BytesIO
-import igraph as ig
-from collections import OrderedDict
-import json
-import shutil
 import os
-from random import randint
+import neo4j
 import sqlite3
-#%%
-# extra tools
-#def ExploreElement(e):
-#    """
-#    take an element from an ElementTree and Pretty Print its children
-#    Args:
-#    e: ElementTree element
-#    """
-#    print(html.etree.tostring(e, pretty_print=True).decode('UTF-8'))
+
+# class Bates(object):
+#     "A class to organize the basic scraping functions"
+#     pass
 
 def get_years():
     """
     Gets the urls of splash pages for all years after 2013-14
+
     Returns:
         A list of strings in the format '?s=query' indicating catalog years
     """
-    page = html.parse('http://www.bates.edu/catalog/?s=1000&a=catalogList')
+    page = html.parse('http://www.bates.edu/catalog/?a=catalogList')
     links = page.xpath('//*[@id="catmenu"]//a')
     results = []
     for a in links:
@@ -45,12 +32,16 @@ def get_years():
     return results
 
 def map_years():
-    "returns a dict mapping urlencoded year queries to academic year strs"
+    """
+    returns a dict mapping urlencoded year queries to academic year strs.
+
+    Returns:
+        as above.
+    """
     page = html.parse('http://www.bates.edu/catalog/?s=1000&a=catalogList')
     links = page.xpath('//*[@id="catmenu"]//a')
     return {i.attrib['href']:i.text[:9] for i in links}
-
-#%%    
+    
 # main functions in approximate order of their usage
 def get_dept_extensions():
     """
@@ -64,7 +55,12 @@ def get_dept_extensions():
 #%%
 def generate_dept_pages():
     """
-    Generates a complete list of urls to scrape
+    Generates a complete list of urls to scrape.
+
+    Returns:
+        a list of all department catalog URLs to scrape. Some may not exist,
+        since new departments have been added after the minimum year of 
+        get_years().
     """
     years = get_years()
     dept_extensions = get_dept_extensions()
@@ -74,105 +70,114 @@ def generate_dept_pages():
             results.append('http://www.bates.edu/catalog/' + year + dept)
     return results
 #%%
-def db_exists():
-    return os.path.isfile('bates_courses.db')
-def setup_db():
-    conn = sqlite3.connect('bates_courses.db')
+def map_codes():
+    """
+    Returns a dict mapping all department names to department codes and another
+    dict mapping all interdisciplinary department shortcodes to department
+    codes.
+
+    Returns:
+        At tuple of two dicts, DEPT:DT and Dept Name:DEPT.
+    """
+    subj_name_ul = root.xpath(".//div[@class='subjName']//li/text()")
+    subj_name = [i.replace('and', '&') for i in subj_name]
+    subj_code = root.xpath(".//div[@class='subjCode']//li/text()")
+    subj_code_2 = root.xpath(".//div[@class='subjCodeInt']//li/text()")
+    if not len(subj_code) == len(subj_code_2) == len(subj_name):
+        raise ValueError('unequal-length code lists')
+    else:
+        shortcode_map = {}
+        names_map = {}
+        for i in range(len(subj_name_ul)):
+            names_map[subj_name[i]] = subj_code[i]
+            shortcode_map[subj_code_2[i]] = subj_code[i]
+        return shortcode_map, names_map
+#%%
+def get_status_db_connection():
+    conn = sqlite3.connect('bates_page_status.db')
     cur = conn.cursor()
     cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS pages_crawled (url text PRIMARY KEY);
-    """
+        """
+        CREATE TABLE IF NOT EXISTS page_status(
+            url varchar(100),
+            status char(3),
+        )
+        """
     )
-    cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS courses(
-        code text,
-        title text,
-        description text,
-        date text,
-        url text PRIMARY KEY
-        );
-    """
-    )
-    cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS concentrations(
-        code text,
-        date text,
-        concentration text
-        );
-    """
-    )
-    cur.execute()
+    conn.commit()
+    return conn, cur
 
-
-def scrape_page(url):
+def scrape_page(url, session):
     """
-    Returns a list of dicts describing courses w/in the dept page
+    Scrape all courses on a Bates department course catalog page
+    Args:
+        url: a string url of a Bates catalog page
+        session: a neo4j.GraphDatabase.driver.session object
+    Returns:
+        None
     """
     page = html.parse(url)
     courses = page.xpath('//*[@class="Course"]')
-    def scrape_class(div):
-        
-        
-        
-    
-def get_all_available_courses(url_list):
-    """
-    scrapes course information from the bates website;
-    Args:
-        url_list: a  list of the urls of each department's course catalog
-    Returns:
-        a 3-tuple of the dict mapping course codes to course info, the list
-        of tuples (prereq, course), and a list of courses that appears more
-        than once
-    """
-    x5 = './span[@class="CourseDesc"]/text()'
+    for course in courses:
+        scrape_course(course, session)
 
-    # a dictionary mapping course codes to a url, their course descriptions,
-    # and a list of prerequisites
-    courses = OrderedDict()
-    # a list of tuples of (prereq, course) codes
-    el = []
-    # a list of course codes that appear more than once
-    crosslistings = []
+class Page(object):
+    """
+    Holds functions for scraping a departmental course catalog page.
+    """
     
-    for url in url_list:
-        tree = html.parse(url)
-        courseList = tree.xpath('//*[@id="col0"]/div[@class="Course"]')
-        for course in courseList:
-            name = course.xpath('./h4[@class="crsname"]/text()')[0]
-            code = name.split('.')[0]
-            url_temp = url + '#' + course.xpath('./a[2]/@name')[0]
-            if code in courses.keys():
-                # the most recent course details have been entered
-                crosslistings.append(url_temp)
-            else:
-                # this is a new course to the list of courses
-                concentrations = course.xpath('./span/div/ul/li/a/text()')
-                desc = ' '.join(course.xpath(x5))
-                courses[code] = OrderedDict()
-                courses[code]["name"] = name
-                courses[code]["concentrations"] = concentrations
-                courses[code]["description"] = desc
-                courses[code]["url"] = "<a href='https://" + url_temp + \
-                                        "'> LINK </a>"
-                if "departments" not in courses[code].keys():
-                    courses[code]["departments"] = [url.split('Dept&d=')[1]]
-                else:
-                    courses[code]["departments"] += [url.split('Dept&d=')[1]]
-                courses[code]["prereqs"] =[]
-                if 'Prerequisite(s):' in desc:
-                    current = code.split()[0]
-                    reqs = desc.split('Prerequisite(s):')[1]
-                    courses[code]["prereqs"] = reqs
-                    immediate_reqs = reqs.split('.')[0].split()
-                    for w in immediate_reqs:
-                        if w.isupper():
-                            current = w
-                        if w.isnumeric():
-                            el.append((current + ' ' + w, code))
+    dept_map = map_codes() 
+    year_map = map_years()
+    
+    def __init__(self, url):
+        self.url = url
+        self.dept = 0 # todo
+        self.page = html.parse(url)
+        self.raw_courses = self.page.xpath('//*[@class="Course"]')
+        self.courses = [Course(url, course) for course in self.raw_courses]
+    
+class Course(Page):
+    "Inherets from Page to keep the year_, dept_map s"
+    def __init__(self, url, course_div):
+        self.url = url
+        self.course_div = course_div
+    
+    def scrape_course(self, session):
+        """
+        Put course info into a this Course object.
+        Args:
+            course: a lxml.html._Element representing a div containing course
+                details.
+            url: the url of the catalog page.
+            session: a neo4j.GraphDatabase.driver.session object.
+        Returns:
+            None
+        """
+        self.name = self.course_div.xpath('./h4[@class="crsname"]/text()')[0]
+        self.code = self.name.split('.')[0]
+        self.link =  self.url + '#' + self.course_div.xpath('./a[2]/@name')[0]
+        self.depts = []
+        for code in self.code.split()[0].split('/'):
+            if code in self.dept_map:
+                code = self.dept_map[code]
+            self.depts.append(code)
+        self.concentrations = course.xpath('./span/div/ul/li/a/text()')
+        self.desc = self.course_div.xpath('./span[@class="CourseDesc"]/text()')
+        self.desc = ' '.join(self.desc)
+        if 'Prerequisite(s):' in self.desc:
+            self.has_requirements = True
+            reqs = desc.split('Prerequisite(s):')[1].split('.')[0].strip()
+            
+    def parse_requirements(self):
+        reqs = desc.split('Prerequisite(s):')[1].split('.')[0].strip()
+        def comma_split():
+            
+#                    immediate_reqs = reqs.split()
+#                    for w in immediate_reqs:
+#                        if w.isupper():
+#                            current = w
+#                        if w.isnumeric():
+#                            el.append((current + ' ' + w, code))
                             # req -> course
     return((courses, el, crosslistings))
 
