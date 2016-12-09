@@ -10,10 +10,13 @@ from lxml import html
 import os
 import neo4j
 import sqlite3
-
+import sqlalchemy
+from sqlalchemy import Column, Integer, SmallInteger, String
+from sqlalchemy.ext.declarative import declarative_base
+Base = declarative_base()
 # class Bates(object):
 #     "A class to organize the basic scraping functions"
-#     pass
+#     
 
 def get_years():
     """
@@ -40,7 +43,11 @@ def map_years():
     """
     page = html.parse('http://www.bates.edu/catalog/?s=1000&a=catalogList')
     links = page.xpath('//*[@id="catmenu"]//a')
-    return {i.attrib['href']:i.text[:9] for i in links}
+    string_map = {i.attrib['href']:i.text[:9] for i in links}
+    int_map = {}
+    for key in string_map:
+        int_map[key] = (int(i) for i in string_map[key].split('-'))
+    return int_map
     
 # main functions in approximate order of their usage
 def get_dept_extensions():
@@ -70,71 +77,131 @@ def generate_dept_pages():
             results.append('http://www.bates.edu/catalog/' + year + dept)
     return results
 #%%
-def map_codes():
-    """
-    Returns a dict mapping all department names to department codes and another
-    dict mapping all interdisciplinary department shortcodes to department
-    codes.
 
-    Returns:
-        At tuple of two dicts, DEPT:DT and Dept Name:DEPT.
-    """
-    subj_name_ul = root.xpath(".//div[@class='subjName']//li/text()")
-    subj_name = [i.replace('and', '&') for i in subj_name]
-    subj_code = root.xpath(".//div[@class='subjCode']//li/text()")
-    subj_code_2 = root.xpath(".//div[@class='subjCodeInt']//li/text()")
-    if not len(subj_code) == len(subj_code_2) == len(subj_name):
-        raise ValueError('unequal-length code lists')
-    else:
-        shortcode_map = {}
-        names_map = {}
-        for i in range(len(subj_name_ul)):
-            names_map[subj_name[i]] = subj_code[i]
-            shortcode_map[subj_code_2[i]] = subj_code[i]
-        return shortcode_map, names_map
 #%%
-def get_status_db_connection():
-    conn = sqlite3.connect('bates_page_status.db')
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS page_status(
-            url varchar(100),
-            status char(3),
-        )
-        """
-    )
-    conn.commit()
-    return conn, cur
+def get_sqlite_db_connection():
+    engine = sqlalchemy.create_engine('sqlite+pysqlite:///bates.db')
+    return engine
+    # cur = conn.cursor()
+    # def commit(command):
+    #     cur.execute(command)
+    #     conn.commit()
+    
+    # commit(
+    #     """
+    #     CREATE TABLE IF NOT EXISTS page_status(
+    #         url varchar(100),
+    #         status char(3),
+    #     )
+    #     """
+    # )
+    # commit(
+    #     """
+    #     CREATE TABLE IF NOT EXISTS courses(
+    #         code varchar(10),
+    #         description varchar
+    #     )
+    #     """
+    # )
+    # commit(
+    #     """
+    #     CREATE TABLE IF NOT EXISTS professors(
+    #     name varchar(50),
+    #     code varchar(10),
+    #     year integer
+    # return conn, cur
 
-def scrape_page(url, session):
-    """
-    Scrape all courses on a Bates department course catalog page
-    Args:
-        url: a string url of a Bates catalog page
-        session: a neo4j.GraphDatabase.driver.session object
-    Returns:
-        None
-    """
-    page = html.parse(url)
-    courses = page.xpath('//*[@class="Course"]')
-    for course in courses:
-        scrape_course(course, session)
-
-class Page(object):
+class Page(Base):
     """
     Holds functions for scraping a departmental course catalog page.
     """
+    def map_codes():
+        """
+        Returns a dict mapping all department names to department codes and another
+        dict mapping all interdisciplinary department shortcodes to department
+        codes.
+
+        Returns:
+            At tuple of two dicts, DEPT:DT and Dept Name:DEPT.
+        """
+        root = html.parse('http://www.bates.edu/catalog/').getroot()
+        subj_name = root.xpath(".//div[@class='subjName']//li/text()")
+        if not subj_name:
+            raise ValueError('No results; check xpath')
+        subj_name = [i.replace('and', '&') for i in subj_name]
+        subj_code = root.xpath(".//div[@class='subjCode']//li/text()")
+        subj_code_2 = root.xpath(".//div[@class='subjCodeInt']//li/text()")
+        if not len(subj_code) == len(subj_code_2) == len(subj_name):
+            raise ValueError('unequal-length code lists')
+        else:
+            shortcode_map = {}
+            names_map = {}
+            for i in range(len(subj_name)):
+                names_map[subj_name[i]] = subj_code[i]
+                shortcode_map[subj_code_2[i]] = subj_code[i]
+            return shortcode_map, names_map
     
-    dept_map = map_codes() 
+    dept_shortcode_map, dept_name_map = map_codes()
+    name_dept_map = {v:k for k, v in dept_name_map}
     year_map = map_years()
+
+    def scrape_page(self, neo4j_session):
+        """
+        Scrape all courses on a Bates department course catalog page.
+
+        Args:
+            url: a string url of a Bates departmental catalog page.
+            session: a neo4j.GraphDatabase.driver.session object.
+
+        Returns:
+            None.
+        """
+        courses = self.page.xpath('//*[@class="Course"]')
+        for course in courses:
+            scrape_course(course, neo4j_session)
     
-    def __init__(self, url):
+    def get_years(self):
+        """
+        Maps the urlencoded catalog year to a tuple (start_year, end_year)
+
+        Returns:
+            a tuple of catalog coverage: (start_year, end_year). The start year
+            corresponds to the falls semester year, and the end year corresponds
+            to the spring semester year.
+        """
+        year = year_map[self.url.split('?s=')[1].split('&')[0]]
+        years = years_map[year]
+        return years
+        
+    def __init__(self, url, neo4j_session):
         self.url = url
-        self.dept = 0 # todo
+        self.dept_code = url.split('&a=renderDept&d=')[1]
+        self.start_year, self.end_year = self.get_years()
         self.page = html.parse(url)
         self.raw_courses = self.page.xpath('//*[@class="Course"]')
+        if not self.raw_courses:
+            # no courses found, a 404 page
+            self.status = 404
+            self.dept_name = 'Does not exist at this time'
+            
+        else:
+            self.status = 200
+            
+            self.dept_name = name_dept_map[self.dept_code]
+            self.selftart_year, self.end_year = years
+            
+        
+        
+        else:
+            self.status = 200
         self.courses = [Course(url, course) for course in self.raw_courses]
+    
+    url = Column(String())
+    dept = Column(String(4))
+    start_year = Column(SmallInteger())
+    end_year = Column(SmallInteger())
+    status = Column(String(10))
+    
     
 class Course(Page):
     "Inherets from Page to keep the year_, dept_map s"
