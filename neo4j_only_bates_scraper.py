@@ -28,10 +28,12 @@ class Bates(object):
         maps = self.map_codes()
         self.maps = maps        
         
-    def map_years(self):
+    def map_years(self, force_page=False):
         """
         returns a dict mapping urlencoded year queries to academic year strs.
-
+        Args:
+            force_page: a boolean, whether or not to force refresh the dept
+            list from the bates catalog splash page.
         Returns:
             as above.
         """
@@ -42,9 +44,13 @@ class Bates(object):
             with open('./cached_xml/YearMap.xml', 'w') as xml_file:
                 xml_file.write(html.etree.tostring(new_catalog_list))
             return new_catalog_list
-    
+        
+        
         if os.path.exists('./cached_xml/YearMap.xml'):
-            catalog_list = html.parse('./cached_xml/YearMap.xml')
+            if force_page:
+                catalog_list = get_page_xml()
+            else:
+                catalog_list = html.parse('./cached_xml/YearMap.xml')
         else:
             catalog_list = get_page_xml()
         links = catalog_list.xpath('//*[@id="catmenu"]//a')
@@ -52,13 +58,25 @@ class Bates(object):
         int_map = {}
         for key in string_map:
             int_map[key] = [int(i) for i in re.split(r'\W', string_map[key])]
+        if datetime.now().year not in [int_map[k][0] for k in int_map]:
+            int_map = self.map_years(force_page=True)
         return int_map
 
     def get_dept_extensions(self):
         """
         Returns a urlencoded queries specifying departments.
         """
-        if os.path.exists('./cached_xml/SplashPage.xml')
+        def get_page_xml():
+            url = 'http://www.bates.edu/catalog/?s=current'
+            page = html.parse(url)
+            new_dept_list = page.xpath('//*[@id="deptList"]')[0]
+            with open('./cached_xml/SplashPage.xml', 'w') as xml_file:
+                xml_file.write(html.etree.tostring(new_dept_list))
+                
+        if os.path.exists('./cached_xml/SplashPage.xml'):
+            dept_list = html.parse('./cached_xml/SplashPage.xml')
+        else:
+            
         dept_list_xpath = '//*[@id="deptList"]/div/li/a/@href'
         results = []
         for href in self.splash_pg.xpath(dept_list_xpath):
