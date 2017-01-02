@@ -42,15 +42,15 @@ class Bates(object):
             page = html.parse(url)
             new_catalog_list = page.xpath('//*[@id="catmenu"]')[0]
             with open('./cached_xml/YearMap.xml', 'w') as xml_file:
-                xml_file.write(html.etree.tostring(new_catalog_list))
+                xml = html.etree.tostring(new_catalog_list).decode('utf8')
+                xml_file.write(xml)
             return new_catalog_list
-        
         
         if os.path.exists('./cached_xml/YearMap.xml'):
             if force_page:
                 catalog_list = get_page_xml()
             else:
-                catalog_list = html.parse('./cached_xml/YearMap.xml')
+                catalog_list = html.parse('./cached_xml/YearMap.xml').getroot()
         else:
             catalog_list = get_page_xml()
         links = catalog_list.xpath('//*[@id="catmenu"]//a')
@@ -59,27 +59,43 @@ class Bates(object):
         for key in string_map:
             int_map[key] = [int(i) for i in re.split(r'\W', string_map[key])]
         if datetime.now().year not in [int_map[k][0] for k in int_map]:
-            int_map = self.map_years(force_page=True)
+            if not force_page: # in which case the most recent page is cached
+                int_map = self.map_years(force_page=True)
         return int_map
 
-    def get_dept_extensions(self):
+    def get_dept_extensions(self, force_page=False):
         """
         Returns a urlencoded queries specifying departments.
+        Args:
+            force_page: a boolean whether to force refresh the page
         """
         def get_page_xml():
+            pdb.set_trace()
             url = 'http://www.bates.edu/catalog/?s=current'
             page = html.parse(url)
             new_dept_list = page.xpath('//*[@id="deptList"]')[0]
+            subj_name = page.xpath('//*[@class="subjName"]')[0]
+            subj_code = page.xpath('//*[@class="subjCode"]')[0]
+            subj_code_2 = page.xpath('//*[@class="subjCodeInt"]')[0]
             with open('./cached_xml/SplashPage.xml', 'w') as xml_file:
-                xml_file.write(html.etree.tostring(new_dept_list))
-                
+                xml = '<body>'
+                xml += html.etree.tostring(subj_name).decode('utf8')
+                xml += html.etree.tostring(subj_code).decode('utf8')
+                xml += html.etree.tostring(subj_code_2).decode('utf8')
+                xml += '</body>'
+                xml_file.write(xml)
+            return page                           
+        
         if os.path.exists('./cached_xml/SplashPage.xml'):
-            dept_list = html.parse('./cached_xml/SplashPage.xml')
+            if force_page:
+                dept_list = get_page_xml()
+            else:
+                dept_list = html.parse('./cached_xml/SplashPage.xml')
         else:
-            
+            dept_list = get_page_xml()
         dept_list_xpath = '//*[@id="deptList"]/div/li/a/@href'
         results = []
-        for href in self.splash_pg.xpath(dept_list_xpath):
+        for href in dept_list.xpath(dept_list_xpath):
             results.append(href.replace('?s=current', ''))
         return results
         
@@ -103,13 +119,18 @@ class Bates(object):
         Returns:
             At tuple of three dicts, DEPT:DT and Dept Name:DEPT.
         """
-        subj_name = self.splash_pg.xpath(".//div[@class='subjName']//li/text()")
+        
+        if os.path.exists('./cached_xml/SplashPage.xml'):
+            page = html.parse('./cached_xml/SplashPage.xml')
+        else:
+            raise FileNotFoundError('No cached splash page')
+
+        subj_name = page.xpath(".//div[@class='subjName']//li/text()")
         if not subj_name:
             raise ValueError('No results; check xpath')
         subj_name = [i.replace('and', '&') for i in subj_name]
-        subj_code = self.splash_pg.xpath(".//div[@class='subjCode']//li/text()")
-        shortcodes_xpath = ".//div[@class='subjCodeInt']//li/text()"
-        subj_code_2 = self.splash_pg.xpath(shortcodes_xpath)
+        subj_code = page.xpath(".//div[@class='subjCode']//li/text()")
+        subj_code_2 = page.xpath(".//div[@class='subjCodeInt']//li/text()")
         if not len(subj_code) == len(subj_code_2) == len(subj_name):
             raise ValueError('unequal-length code lists')
         else:
@@ -509,19 +530,20 @@ class Taught(object):
     
     def merge(self):
         ""
-        years = self.session.run(
-            """
-            MERGE (p:Prof {{name:{name}}}) -[t:Taught]-> (c:Course {{code:{code}}})
-            ON CREATE SET t.years = [{year}]
-            RETURN t.years
-            """.format(
-                code=self.course,
-                name=self.prof_name,
-                year=self.year
-            )
-        )
-        years = [record[0]['years'] for record in years]
-        if self.year not in [i["year"] for i in years]:
+        cypher = """
+        MERGE (p:Prof {{name:'{name}'}}) -[t:Taught]-> (c:Course {{code:'{code}'}})
+        ON CREATE SET t.years = [{year}]
+        RETURN t.years
+        """.format(
+                   code=self.course,
+                   name=self.prof_name,
+                   year=self.year
+                   )
+        records = [i for i in self.session.run(cypher)]
+        years = []
+        for record in records:
+            years += record['t.years']
+        if self.year not in years:
             self.session.run(
                 """
                 MATCH (p:Prof) -[t:Taught]-> (c:Course)
@@ -562,7 +584,9 @@ p.parse()
 c = p.courses[0]
 print(c)
 print(c.parse_professors())
+#%%
 c.merge_profs()
+#%%
 print(c.parse_requirements())
 #%%
 PROG = pb.ProgressBar()
