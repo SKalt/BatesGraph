@@ -281,21 +281,21 @@ class Course(object):
             MATCH (c:Course) WHERE c.code = {} RETURN c.years
             """.format(self.code)
             )
-        years = [record[0]['years'] for record in years]
+        years = [record['c.years'] for record in years]
         if years is None or self.start_year not in years:
             self.session.run(
                 """
-                MERGE (n:Course {{code:{code}}})
+                MERGE (n:Course {{code:'{code}'}})
                 ON CREATE SET
-                    n.link = {link},
-                    n.title = {title},
-                    n.desc = {desc},
+                    n.link = '{link}',
+                    n.title = '{title}',
+                    n.desc = '{desc}',
                     n.requirements_flag = {requirements_flag}
                     n.years = [{year}]
                 ON MERGE SET
-                    n.link = {link},
-                    n.title = {title},
-                    n.desc = {desc},
+                    n.link = '{link}',
+                    n.title = '{title}',
+                    n.desc = '{desc}',
                     n.requirements_flag = {requirements_flag}
                     n.years = n.start_year + {start_year}
                 """.format(
@@ -336,7 +336,7 @@ class Dept(object):
         # ensure the dept exists
         dept_years = self.session.run(
             """
-            MERGE (d {{code:{code}}})
+            MERGE (d {{code:'{code}'}})
             ON CREATE SET
                 d.years = [{year}]
             RETURN d.years
@@ -348,7 +348,7 @@ class Dept(object):
             self.session.run(
                 """
                 MATCH (d:Dept)
-                WHERE d.code = {dept_code}
+                WHERE d.code = '{dept_code}'
                 SET d.years = d.years + {year}
                 RETURN d.years
                 """.format(
@@ -360,7 +360,7 @@ class Dept(object):
         link_years = self.session.run(
             """
             MATCH (c:Course), (d:Dept)
-            WHERE c.code = {code} AND d.code = {dept_code}
+            WHERE c.code = '{code}' AND d.code = '{dept_code}'
             MERGE  (c) -[i:In_Dept]-> (d)
             ON CREATE SET
                 i.years = [{year}]
@@ -377,7 +377,7 @@ class Dept(object):
             self.session.run(
                 """
                 MATCH (c:Course), (d:Dept)
-                WHERE c.code = {code} AND d.code = {dept_code}
+                WHERE c.code = '{code}' AND d.code = '{dept_code}'
                 MERGE (c) -[i:In_Dept]-> (d)
                 ON MATCH SET
                 i.years = i.years + {year}
@@ -404,8 +404,8 @@ class Prerequisite(object):
         # ensure a link from all 
         link_years = self.session.run(
             """
-            MERGE (n:Course {{code:{n}}}) -[r:Prereq_To]-> (m:Course {{code:{m}}})
-            ON CREATE SET r.years = [{year}], r.label = {label}
+            MERGE (n:Course {{code:'{n}'}}) -[r:Prereq_To]-> (m:Course {{code:'{m}'}})
+            ON CREATE SET r.years = [{year}], r.label = '{label}'
             RETURN r.years
             """.format(
                 n=self.required,
@@ -414,14 +414,14 @@ class Prerequisite(object):
                 label=self.label
             )
         )
-        link_years = [record[0]['years'] for record in link_years][0]
+        link_years = [record['r.years'] for record in link_years][0]
         # update requiremnt year, label
         if self.year not in link_years:
             self.session.run(
                 """
                 MATCH (n:Course) -[r:Prereq_To] -> (m:Course)
-                WHERE m.code = {} AND n.code = {}
-                SET r.years = r.years + {}, r.label = {}
+                WHERE m.code = '{}' AND n.code = '{}'
+                SET r.years = r.years + {}, r.label = '{}'
                 """.format(
                     self.required,
                     self.requirer,
@@ -458,10 +458,10 @@ class Program(object):
         ""
         conc_years = self.session.run(
             """
-            MERGE (conc:Conentration {{code:{code}}})
+            MERGE (conc:Conentration {{code:'{code}'}})
             ON CREATE SET
                 conc.years = [{year}]
-                conc.name = {name}
+                conc.name = '{name}'
             RETURN conc.years
             """.format(
                 code=self.conc_code,
@@ -473,7 +473,7 @@ class Program(object):
         if self.year not in conc_years:
             self.session.run(
                 """
-                MERGE (conc:Conentration {{code:{code}}})
+                MERGE (conc:Conentration {{code:'{code}'}})
                 ON MATCH SET
                     conc.years = conc.years + {year}
                 RETURN conc.years
@@ -485,7 +485,7 @@ class Program(object):
         link_years = self.session.run(
             """
             MATCH (c:Course), (conc:Concentration)
-            WHERE c.code = {course_code} AND conc.code = {conc_code}
+            WHERE c.code = '{course_code}' AND conc.code = '{conc_code}'
             MERGE (c) -[i:In_Concentration]-> (conc)
             ON CREATE SET
             i.years = [{year}]
@@ -501,7 +501,7 @@ class Program(object):
             self.session.run(
                 """
                 MATCH (c:Course), (conc:Concentration)
-                WHERE c.code = {course_code} AND conc.code = {conc_code}
+                WHERE c.code = '{course_code}' AND conc.code = '{conc_code}'
                 MERGE (c) -[i:In_Concentration]-> (conc)
                 ON MATCH SET
                 i.years = [{year}]
