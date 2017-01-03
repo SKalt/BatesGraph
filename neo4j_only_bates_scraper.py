@@ -70,7 +70,6 @@ class Bates(object):
             force_page: a boolean whether to force refresh the page
         """
         def get_page_xml():
-            pdb.set_trace()
             url = 'http://www.bates.edu/catalog/?s=current'
             page = html.parse(url)
             new_dept_list = page.xpath('//*[@id="deptList"]')[0]
@@ -271,14 +270,14 @@ class Course(object):
         programs = []
         for program in self.program_membership:
             # program is a string.
-            programs.append(Program(program))
+            programs.append(Program(self, program))
         return programs
         
     def merge(self):
         # check if the course is already present
         years = self.session.run(
             """
-            MATCH (c:Course) WHERE c.code = {} RETURN c.years
+            MATCH (c:Course) WHERE c.code = '{}' RETURN c.years
             """.format(self.code)
             )
         years = [record['c.years'] for record in years]
@@ -297,15 +296,14 @@ class Course(object):
                     n.title = '{title}',
                     n.desc = '{desc}',
                     n.requirements_flag = {requirements_flag}
-                    n.years = n.start_year + {start_year}
+                    n.years = n.years + {year}
                 """.format(
                     code=self.code,
                     link=self.link,
                     title=self.title,
                     desc=self.desc,
-                    requirements_flag=(self.requirements is not None),
-                    start_year=self.start_year,
-                    end_year=self.end_year
+                    requirements_flag=('Prerequisite(s):' in self.desc),
+                    year=self.start_year
                 )
             )
 
@@ -321,9 +319,9 @@ class Course(object):
             prereq.merge()
             
     def merge_program_membership(self):
-        concs = self.parse_concentrations()
-        for conc in concs:
-            conc.merge()
+        programs = self.parse_program_membership()
+        for program in programs:
+            program.merge()
 
 class Dept(object):
     def __init__(self, course_inst, dept_code):
@@ -445,7 +443,7 @@ class Program(object):
         self.conc_code = re.search(r'C\d\d\d', concentration_name)
         if self.conc_code:
             self.conc_code = self.conc_code.group()
-        self.name = concentration_name.split('(')[0]
+        self.name = concentration_name.split('(')[0].strip()
         self.session = course_inst.session
 
     def __repr__(self):
@@ -456,11 +454,10 @@ class Program(object):
     
     def merge(self):
         ""
-        conc_years = self.session.run(
-            """
+        cypher = """
             MERGE (conc:Conentration {{code:'{code}'}})
             ON CREATE SET
-                conc.years = [{year}]
+                conc.years = [{year}],
                 conc.name = '{name}'
             RETURN conc.years
             """.format(
@@ -468,8 +465,10 @@ class Program(object):
                 year=self.year,
                 name=self.name
                 )
-            )
-        conc_years = [record[0]['years'] for record in conc_years]
+        print(cypher)
+        conc_years = self.session.run(cypher)
+            
+        conc_years = [record['conc.years'] for record in conc_years]
         if self.year not in conc_years:
             self.session.run(
                 """
@@ -585,7 +584,11 @@ c = p.courses[0]
 print(c)
 print(c.parse_professors())
 #%%
+c.merge()
+#%%
 c.merge_profs()
+#%%
+c.merge_program_membership()
 #%%
 print(c.parse_requirements())
 #%%
