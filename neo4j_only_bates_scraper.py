@@ -12,7 +12,6 @@ import string
 from lxml import html
 from datetime import datetime
 from neo4j.v1 import GraphDatabase, basic_auth
-import progressbar as pb
 
 class Bates(object):
     "A class to organize the basic scraping functions"
@@ -70,6 +69,7 @@ class Bates(object):
             force_page: a boolean whether to force refresh the page
         """
         def get_page_xml():
+            
             url = 'http://www.bates.edu/catalog/?s=current'
             page = html.parse(url)
             new_dept_list = page.xpath('//*[@id="deptList"]')[0]
@@ -78,6 +78,7 @@ class Bates(object):
             subj_code_2 = page.xpath('//*[@class="subjCodeInt"]')[0]
             with open('./cached_xml/SplashPage.xml', 'w') as xml_file:
                 xml = '<body>'
+                xml += html.etree.tostring(new_dept_list).decode('utf8')
                 xml += html.etree.tostring(subj_name).decode('utf8')
                 xml += html.etree.tostring(subj_code).decode('utf8')
                 xml += html.etree.tostring(subj_code_2).decode('utf8')
@@ -103,8 +104,10 @@ class Bates(object):
         Returns a list of tuples of dept_query, year_query's
         """
         results = []
-        for year in self.year_link_map:
-            if self.year_link_map[year][0] > 2014:
+        year_queries = [i for i in self.year_link_map]
+        year_queries.sort(key=lambda y: self.year_link_map[y][0])
+        for year in year_queries:
+            if self.year_link_map[year][0] > 2013:
                 for dept in self.dept_page_queries:
                     results.append((dept, year))
         return results
@@ -169,22 +172,29 @@ class Page(object):
         Caches the page.
         """
         xml_file = ''
-        for div in self.page.xpath('//*[@class="Course"]'):
-            # each div describes a course; cache only these.
-            xml_file += html.etree.tostring(div).decode('utf8')
+        try:
+            for div in self.page.xpath('//*[@class="Course"]'):
+                # each div describes a course; cache only these.
+                xml_file += html.etree.tostring(div).decode('utf8')
+        except AssertionError:
+            pass
         with open('cached_xml/' + fname, 'w') as target:
             target.write(xml_file)
+        
 
     def parse(self):
         "create Courses out of all course divs within the page"
-        for div in self.page.xpath('//*[@class="Course"]'):
-            name = div.xpath('./h4[@class="crsname"]/text()')[0]
-            # code = name.split('.')[0]
-            div_id = div.xpath('./a[2]/@name')[0]
-            desc = '\n'.join(div.xpath('./span[@class="CourseDesc"]/text()'))
-            concs = div.xpath('./span/div/ul/li/a/text()') # concentrations
-            course = Course(self, name, div_id, desc, concs, SESSION)
-            self.courses.append(course)
+        try:
+            for div in self.page.xpath('//*[@class="Course"]'):
+                name = div.xpath('./h4[@class="crsname"]/text()')[0]
+                # code = name.split('.')[0]
+                div_id = div.xpath('./a[2]/@name')[0]
+                desc = '\n'.join(div.xpath('./span[@class="CourseDesc"]/text()'))
+                concs = div.xpath('./span/div/ul/li/a/text()') # concentrations
+                course = Course(self, name, div_id, desc, concs, SESSION)
+                self.courses.append(course)
+        except AssertionError:
+            pass
 
 class Course(object):
     "Represents a course description"
@@ -205,14 +215,15 @@ class Course(object):
             session:
         """
         self.code, self.title = [i.strip() for i in name.split('.', 1) if i]
+        self.title = self.title.replace('"', "'")
         self.link = parent_page.url + '#' + div_id
         self.start_year, self.end_year = parent_page.years
         self.dept = parent_page.dept
-        self.desc = desc
+        self.desc = desc.replace('"', "'")
         self.program_membership = program_tags
         self.session = session
 
-    def parse_requirements(self):
+    def parse_prerequisites(self):
         """
         Populates self.requirements
         """
@@ -254,7 +265,9 @@ class Course(object):
         desc = self.desc.split('Prerequisite(s)')[::-1][0]
         profs = re.findall(r' [A-Z]\. [A-Z]\w+[-]?\w+| staff| Staff', desc)
         if not profs:
-            raise ValueError('Course description does not have teacher listed')
+            # raise ValueError('Course description does not have teacher listed')
+            print('Course description does not have teacher listed')
+            return []
         else:
             profs = [i.strip() for i in profs]
             results = []
@@ -262,51 +275,56 @@ class Course(object):
                 if i.lower() == 'staff':
                     results.append(Taught(self, 'Staff'))
                 else:
-                    results.append(Taught(i, self.code, self.session))
+                    results.append(Taught(self, i))
             return results
 
     def parse_program_membership(self):
         "parses both interdisciplinary program and concentration membership"
         programs = []
-        for program in self.program_membership:
-            # program is a string.
-            programs.append(Program(self, program))
+        for program_str in self.program_membership:
+            # program_str is a string.
+            code = re.search(r'C\d\d\d', program_str)
+            if code:
+                programs.append(Concentration(self, program_str, code))
+            else:
+                programs.append(Program(self, program_str))
         return programs
         
     def merge(self):
-        # check if the course is already present
-        years = self.session.run(
-            """
-            MATCH (c:Course) WHERE c.code = '{}' RETURN c.years
-            """.format(self.code)
-            )
-        years = [record['c.years'] for record in years]
-        if years is None or self.start_year not in years:
-            self.session.run(
-                """
-                MERGE (n:Course {{code:'{code}'}})
-                ON CREATE SET
-                    n.link = '{link}',
-                    n.title = '{title}',
-                    n.desc = '{desc}',
-                    n.requirements_flag = {requirements_flag}
-                    n.years = [{year}]
-                ON MERGE SET
-                    n.link = '{link}',
-                    n.title = '{title}',
-                    n.desc = '{desc}',
-                    n.requirements_flag = {requirements_flag}
-                    n.years = n.years + {year}
-                """.format(
-                    code=self.code,
-                    link=self.link,
-                    title=self.title,
-                    desc=self.desc,
-                    requirements_flag=('Prerequisite(s):' in self.desc),
-                    year=self.start_year
-                )
-            )
-
+        # ensure the course is present, has details
+        cypher = """
+        MERGE (n:Course {{code:'{code}'}})
+        ON CREATE SET
+            n.link = "{link}",
+            n.title = "{title}",
+            n.desc = "{desc}",
+            n.requirements_flag = {requirements_flag},
+            n.years = [{year}]
+        ON MATCH SET
+            n.link = "{link}",
+            n.title = "{title}",
+            n.desc = "{desc}",
+            n.requirements_flag = {requirements_flag}
+        """.format(
+            code=self.code,
+            link=self.link,
+            title=self.title,
+            desc=self.desc,
+            requirements_flag=('Prerequisite(s):' in self.desc),
+            year=self.start_year
+        )
+        self.session.run(cypher)
+        cypher = """
+        MATCH (n:Course {{code:'{code}'}})
+        UNWIND n.years + {year} AS years
+        WITH n, COLLECT(DISTINCT years) as unique_years
+            SET n.years = unique_years
+        """.format(
+            code=self.code,
+            year=self.start_year
+        ) # verified
+        self.session.run(cypher)
+        return
 
     def merge_profs(self):
         profs = self.parse_professors()
@@ -315,79 +333,52 @@ class Course(object):
             
     def merge_prereqs(self):
         prereqs = self.parse_prerequisites()
-        for prereq in prereqs:
-            prereq.merge()
+        if prereqs:
+            for prereq in prereqs:
+                prereq.merge()
             
     def merge_program_membership(self):
         programs = self.parse_program_membership()
+        programs.append(Dept(self))
         for program in programs:
             program.merge()
 
 class Dept(object):
-    def __init__(self, course_inst, dept_code):
+    def __init__(self, course_inst):
         self.session = course_inst.session
         self.member = course_inst.code
-        self.dept_code = dept_code
-        self.year = couse_inst.start_year
+        self.dept_code = course_inst.dept
+        self.year = course_inst.start_year
+        
+    def __repr__(self):
+        return '<{} {}>'.format(self.dept_code, self.year)
         
     def merge(self):
-        # ensure the dept exists
-        dept_years = self.session.run(
-            """
-            MERGE (d {{code:'{code}'}})
-            ON CREATE SET
-                d.years = [{year}]
-            RETURN d.years
-            """.format(year=self.year, code=self.dept_code)
-            )
-        dept_years = [record[0]['years'] for record in dept_years]
-        # ensure dept has current course year
-        if self.year not in dept_years:
-            self.session.run(
-                """
-                MATCH (d:Dept)
-                WHERE d.code = '{dept_code}'
-                SET d.years = d.years + {year}
-                RETURN d.years
-                """.format(
-                    dept_code=self.dept_code,
-                    year=self.year
-                )
-            )
-        # check course is linked to department / has course year
-        link_years = self.session.run(
-            """
-            MATCH (c:Course), (d:Dept)
-            WHERE c.code = '{code}' AND d.code = '{dept_code}'
-            MERGE  (c) -[i:In_Dept]-> (d)
-            ON CREATE SET
-                i.years = [{year}]
-            RETURN i.years
+        # ensure the dept exists, and Dept, In_Dept have unique year arrays with
+        # the current year
+        # TODO : change In_Program, In_Dept to In
+        cypher = """
+        MERGE (d:Dept {{code:'{code}'}})
+        ON CREATE SET d.years = [{year}]
+        MERGE (c:Course {{code:'{course_code}'}})
+        MERGE (c)-[i:In_Dept]->(d)
+        ON CREATE SET i.years = [{year}]
+        WITH d, i
+            UNWIND d.years + {year} as d_years
+            UNWIND i.years + {year} AS i_years
+        WITH d, i, 
+            COLLECT(DISTINCT d_years) AS d_unique_years,
+            COLLECT(DISTINCT i_years) AS i_unique_years
+                SET d.years = d_unique_years
+                SET i.years = i_unique_years
+        RETURN d.years, i.years
             """.format(
-                code=self.member,
-                dept_code=self.dept_code,
-                year=self.year
-                )
-        )
-        link_years = [record[0]['years'] for record in link_years]
-        # ensure link in appropriate year
-        if self.year not in link_years:
-            self.session.run(
-                """
-                MATCH (c:Course), (d:Dept)
-                WHERE c.code = '{code}' AND d.code = '{dept_code}'
-                MERGE (c) -[i:In_Dept]-> (d)
-                ON MATCH SET
-                i.years = i.years + {year}
-                ON CREATE SET
-                i.years = [{year}]
-                RETURN i.years
-                """.format(
-                    code=self.member,
-                    dept_code=self.dept_code,
-                    year=self.year
-                    )
-                )
+                year=self.year,
+                code=self.dept_code,
+                course_code=self.member
+            )
+        result = self.session.run(cypher)
+        
     
 class Prerequisite(object):
 
@@ -399,35 +390,37 @@ class Prerequisite(object):
         self.session = course_inst.session
 
     def merge(self):
-        # ensure a link from all 
-        link_years = self.session.run(
-            """
-            MERGE (n:Course {{code:'{n}'}}) -[r:Prereq_To]-> (m:Course {{code:'{m}'}})
+        # ensure prereq node, link exists, and link.year is a non-empty array
+        cypher = """
+        MERGE (n:Course {{code:'{n}'}})
+        MERGE (m:Course {{code:'{m}'}})
+        MERGE (n)-[r:Prereq_To]->(m)
             ON CREATE SET r.years = [{year}], r.label = '{label}'
-            RETURN r.years
-            """.format(
-                n=self.required,
-                m=self.requirer,
-                year=self.year,
-                label=self.label
-            )
-        )
-        link_years = [record['r.years'] for record in link_years][0]
-        # update requiremnt year, label
-        if self.year not in link_years:
-            self.session.run(
-                """
-                MATCH (n:Course) -[r:Prereq_To] -> (m:Course)
-                WHERE m.code = '{}' AND n.code = '{}'
-                SET r.years = r.years + {}, r.label = '{}'
-                """.format(
-                    self.required,
-                    self.requirer,
-                    self.year,
-                    self.label
-                )
-            )
-            
+            ON MATCH SET r.label = '{label}'
+        WITH r
+            UNWIND r.years + {year} AS req_years
+        WITH r, COLLECT(DISTINCT req_years) as unique_years
+            SET r.years = unique_years
+        """.format(
+            m=self.requirer,
+            n=self.required,
+            year=self.year,
+            label=self.label
+        ) # verified
+        self.session.run(cypher)
+        # # ensure Prereq_To.years members are unique and contain self.year
+        # cypher = """
+        # MATCH (n:Course {{code:'{n}'}})-[r:Prereq_To]->(m:Course {{code:'{m}'}})
+        # UNWIND r.years + {year} AS req_years
+        # WITH r, COLLECT(DISTINCT req_years) as unique_years
+        # SET r.years = unique_years
+        # """.format(
+        #     m=self.requirer,
+        #     n=self.required,
+        #     year=self.year
+        # ) # verified
+        # self.session.run(cypher)
+        #TODO: consolidate program, concentration, dept cql commands to one formatted string
     def __repr__(self):
         return '<Prereq {}->{} {}>'.format(
             self.required,
@@ -437,80 +430,108 @@ class Prerequisite(object):
 
 class Program(object):
     ""
-    def __init__(self, course_inst, concentration_name):
+    def __init__(self, course_inst, program_name):
         self.year = course_inst.start_year
         self.course_code = course_inst.code
-        self.conc_code = re.search(r'C\d\d\d', concentration_name)
-        if self.conc_code:
-            self.conc_code = self.conc_code.group()
-        self.name = concentration_name.split('(')[0].strip()
+        self.name = program_name.split('(')[0].strip()
         self.session = course_inst.session
+        self.label = 'Program'
 
     def __repr__(self):
-        return '<Program {} {}>'.format(
+        return '<{} {} {}>'.format(
+            self.label,
             self.name,
             self.year
             )
     
     def merge(self):
         ""
+        # ensure Program node, In_Program in db, and have unique .year arrays
         cypher = """
-            MERGE (conc:Conentration {{code:'{code}'}})
-            ON CREATE SET
-                conc.years = [{year}],
-                conc.name = '{name}'
-            RETURN conc.years
-            """.format(
-                code=self.conc_code,
-                year=self.year,
-                name=self.name
-                )
-        print(cypher)
-        conc_years = self.session.run(cypher)
-            
-        conc_years = [record['conc.years'] for record in conc_years]
-        if self.year not in conc_years:
-            self.session.run(
-                """
-                MERGE (conc:Conentration {{code:'{code}'}})
-                ON MATCH SET
-                    conc.years = conc.years + {year}
-                RETURN conc.years
-                """.format(
-                    code=self.conc_code,
-                    year=self.year,
-                )
-            )
-        link_years = self.session.run(
-            """
-            MATCH (c:Course), (conc:Concentration)
-            WHERE c.code = '{course_code}' AND conc.code = '{conc_code}'
-            MERGE (c) -[i:In_Concentration]-> (conc)
-            ON CREATE SET
-            i.years = [{year}]
-            RETURN i.years
-            """.format(
-                course_code=self.course_code,
-                year=self.year,
-                conc_code =self.conc_code
-                )
-            )
-        link_years = [record[0]['years'] for record in link_years]
-        if self.year not in link_years:
-            self.session.run(
-                """
-                MATCH (c:Course), (conc:Concentration)
-                WHERE c.code = '{course_code}' AND conc.code = '{conc_code}'
-                MERGE (c) -[i:In_Concentration]-> (conc)
-                ON MATCH SET
-                i.years = [{year}]
-                RETURN i.years
-                """.format(
-                    course_code=self.course_code,
-                    year=self.year,
-                    conc_code =self.conc_code
-                )
-            )
+        MERGE (p:Program {{name:'{name}'}})
+            ON CREATE SET p.years = [{year}]
+        MERGE (c:Course {{code:'{code}'}})
+        MERGE (p)<-[i:In_Program]-(c)
+            ON CREATE SET i.years = [{year}]
+        WITH p, i
+            UNWIND p.years + {year} as p_years
+            UNWIND i.years + {year} as i_years
+        WITH p, i,
+            COLLECT(DISTINCT p_years) AS p_unique_years,
+            COLLECT(DISTINCT i_years) AS i_unique_years
+                SET p.years = p_unique_years
+                SET i.years = i_unique_years
+        """.format(
+            code=self.course_code,
+            year=self.year,
+            name=self.name
+        ) # verified effectiveness in neo4j console
+        # print(cypher)
+        results = [i for i in self.session.run(cypher)]
+        # ensure Program.years, In_Program.years unique and contain self.year
+        # cypher = """
+        # MATCH (p:Program {{name:'{name}'}})
+        # UNWIND p.years + {year} AS program_years
+        # WITH p, COLLECT(DISTINCT program_years) AS unique_years
+        #     SET p.years = unique_years
+
+        # WITH p
+        #     MATCH (p)<-[i:In_Program]-(c:Course {{code:'{code}'}})
+        #     UNWIND i.years + {year} AS membership_years
+        #     WITH i, COLLECT(DISTINCT membership_years) AS unique_membership_years
+        #         SET i.years = unique_membership_years
+        # """.format(
+        #     code=self.course_code,
+        #     name=self.name,
+        #     year=self.year,
+        # ) # verified effective despite the odd with clause
+        # print(cypher)
+        # print(self.session.run(cypher))
+        return
+
+class Concentration(Program):
+    def __init__(self, course_inst, conc_name, conc_code):
+        Program.__init__(self, course_inst, conc_name)
+        self.code = conc_code
+        self.label = 'Concentration'
+    def merge(self):
+        ""
+        # ensure Concentration, In_Program exist with .year arrays
+        cypher = """
+        MERGE (con:Concentration {{name:'{name}'}})
+            ON CREATE SET con.years = [{year}]
+        MERGE (cou:Course {{code:'{code}'}})
+        MERGE (con)<-[i:In_Program]-(cou)
+            ON CREATE SET i.years = [{year}]
+        WITH con, i
+            UNWIND con.years + {year} as con_years
+            UNWIND i.years + {year} as i_years
+        WITH con, i,
+            COLLECT(DISTINCT con_years) AS con_unique_years,
+            COLLECT(DISTINCT i_years) AS i_unique_years
+                SET con.years = con_unique_years
+                SET i.years = i_unique_years
+        RETURN con.years, i.years
+        """.format(
+            code=self.course_code,
+            year=self.year,
+            name=self.name
+        )
+        # print(cypher)
+        results = self.session.run(cypher)
+        # 
+        # cypher = """
+        # MATCH (con:Concentration )<-[i:In_Program]-(cou:Course )
+        # WHERE con.name = '{name}' AND cou.code ='{code}'
+        # UNWIND con.years + {year} AS conc_years
+        # UNWIND i.years + {year} AS membership_years
+        # WITH i, COLLECT(DISTINCT membership_years) as unique_years
+        # SET i.years = unique_years
+        # WITH con, COLLECT(DISTINCT conc_years) as unique_years
+        # SET con.years = unique_years
+        # """
+        # print(cypher)
+        # print([i for i in self.session.run(cypher)])
         return
 
 class Taught(object):
@@ -529,33 +550,50 @@ class Taught(object):
     
     def merge(self):
         ""
+        # ensure prof, taught link exist & have unique, current .year arrays
         cypher = """
-        MERGE (p:Prof {{name:'{name}'}}) -[t:Taught]-> (c:Course {{code:'{code}'}})
-        ON CREATE SET t.years = [{year}]
-        RETURN t.years
+        MERGE (p:Prof {{name:'{name}'}})
+            ON CREATE SET p.years = [{year}]
+        MERGE (c:Course {{code:'{code}'}})
+        MERGE (p)-[t:Taught]->(c)
+                ON CREATE SET t.years = [{year}]
+        WITH p, t
+            UNWIND t.years + {year} AS taught_years
+            UNWIND p.years + {year} AS prof_years
+        WITH p, t,
+            COLLECT(DISTINCT taught_years) AS t_unique_years,
+            COLLECT(DISTINCT prof_years) AS p_unique_years
+                SET t.years = t_unique_years
+                SET p.years = p_unique_years 
         """.format(
                    code=self.course,
                    name=self.prof_name,
                    year=self.year
                    )
         records = [i for i in self.session.run(cypher)]
-        years = []
-        for record in records:
-            years += record['t.years']
-        if self.year not in years:
-            self.session.run(
-                """
-                MATCH (p:Prof) -[t:Taught]-> (c:Course)
-                WHERE p.name = {name} AND c.code = {code}
-                SET t.years = t.years + {year}
-                """.format(
-                    name=self.prof_name,
-                    code=self.course,
-                    year=self.year
-                )
-            )
+        # cypher = """
+        # MATCH (p:Prof) -[t:Taught]-> (c:Course)
+        # WHERE p.name = '{name}' AND c.code = '{code}'
+        #     UNWIND t.years + {year} AS taught_years
+        #     UNWIND p.years + {year} AS prof_years
+        # WITH p,
+        #     t,
+        #     COLLECT(DISTINCT taught_years) AS t_unique_years,
+        #     COLLECT(DISTINCT prof_years) AS p_unique_years
+        #         SET t.years = t_unique_years
+        # SET p.years = p_unique_years
+        # """.format(
+        #     name=self.prof_name,
+        #     code=self.course,
+        #     year=self.year
+        # )
+        # print(cypher)
+        # self.session.run(cypher)
         return
 #%%
+def get_xml_year(xml_filename):
+    return int(xml_filename[::-1][4:8][::-1])
+
 if __name__ == "__main__":
     if os.getcwd().split('/')[::-1][0] != 'BatesGraph':
         os.chdir('ProgrammingProjects/BatesGraph')
@@ -573,10 +611,30 @@ if __name__ == "__main__":
     SESSION.run('CREATE CONSTRAINT ON (p:Prof) ASSERT p.name IS UNIQUE')
     SESSION.run('CREATE CONSTRAINT ON (p:Program) ASSERT p.code IS UNIQUE')
     BATES = Bates()
-    #%%
-    PROG = pb.ProgressBar()    
-    for dept, year in PROG(BATES.page_query_tuples:
+    for dept, year in BATES.page_query_tuples:
         PAGE = Page(dept, year)
+        PAGE.parse()
+        for course in PAGE.courses:
+            course.merge()
+            course.merge_profs()
+            course.merge_prereqs()
+            course.merge_program_membership()
+#%%
+#%%
+os.chdir('ProgrammingProjects/BatesGraph')
+#%%
+if 'USR' not in dir():
+    USR = input('username: ')
+    PWD = input('password: ')
+DRIVER = GraphDatabase.driver(
+    "bolt://localhost",
+    auth=basic_auth(USR, PWD)
+)
+SESSION = DRIVER.session()
+BATES = Bates()
+cached_pages = os.listdir('./cached_xml')
+cached_pages = [i for i in cached_pages if i[::-1][4:8].isnumeric()]
+cached_pages.sort(key=lambda i: int(i[::-1][4:8][::-1]))
 #%%
 p = Page('&a=renderDept&d=WGST', '?s=1097')
 p.parse()
@@ -586,12 +644,18 @@ print(c.parse_professors())
 #%%
 c.merge()
 #%%
+p = c.parse_professors()[0]
+p.merge()
+#%%
 c.merge_profs()
 #%%
-c.merge_program_membership()
+programs = c.parse_program_membership()
+p = programs[0]
+#c.merge_program_membership()
 #%%
 print(c.parse_requirements())
 #%%
 PROG = pb.ProgressBar()
 for dept, year in PROG(BATES.page_query_tuples):
     PAGE = Page(dept, year)
+    #%%
