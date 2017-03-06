@@ -9,8 +9,9 @@ Created on Thu Dec 24 12:27:32 2015
 import os
 import re
 import string
-from lxml import html
 from datetime import datetime
+import progressbar as pb
+from lxml import html
 from neo4j.v1 import GraphDatabase, basic_auth
 
 class Bates(object):
@@ -18,15 +19,14 @@ class Bates(object):
     def __init__(self):
         """
         Populates object attributes
-        >>>
         """
 #        self.splash_pg = html.parse('http://www.bates.edu/catalog/?s=current')
         self.year_link_map = self.map_years()
         self.dept_page_queries = self.get_dept_extensions()
         self.page_query_tuples = self.generate_page_query_tuples()
         maps = self.map_codes()
-        self.maps = maps        
-        
+        self.maps = maps
+
     def map_years(self, force_page=False):
         """
         returns a dict mapping urlencoded year queries to academic year strs.
@@ -44,7 +44,7 @@ class Bates(object):
                 xml = html.etree.tostring(new_catalog_list).decode('utf8')
                 xml_file.write(xml)
             return new_catalog_list
-        
+
         if os.path.exists('./cached_xml/YearMap.xml'):
             if force_page:
                 catalog_list = get_page_xml()
@@ -62,14 +62,21 @@ class Bates(object):
                 int_map = self.map_years(force_page=True)
         return int_map
 
-    def get_dept_extensions(self, force_page=False):
+    @staticmethod
+    def get_dept_extensions(force_page=False):
         """
-        Returns a urlencoded queries specifying departments.
+        Scrapes, returns a list of urlencoded queries specifying departments.
         Args:
             force_page: a boolean whether to force refresh the page
+        Returns:
+        a list of department page urls.
         """
         def get_page_xml():
-            
+            """
+            writes the relevant info to an xml file.
+            Returns:
+            a lxml.html.etree splashpage.
+            """
             url = 'http://www.bates.edu/catalog/?s=current'
             page = html.parse(url)
             new_dept_list = page.xpath('//*[@id="deptList"]')[0]
@@ -84,8 +91,8 @@ class Bates(object):
                 xml += html.etree.tostring(subj_code_2).decode('utf8')
                 xml += '</body>'
                 xml_file.write(xml)
-            return page                           
-        
+            return page
+
         if os.path.exists('./cached_xml/SplashPage.xml'):
             if force_page:
                 dept_list = get_page_xml()
@@ -98,7 +105,7 @@ class Bates(object):
         for href in dept_list.xpath(dept_list_xpath):
             results.append(href.replace('?s=current', ''))
         return results
-        
+
     def generate_page_query_tuples(self):
         """
         Returns a list of tuples of dept_query, year_query's
@@ -114,14 +121,14 @@ class Bates(object):
 
     def map_codes(self):
         """
-        Returns a dict mapping all department names to department codes and 
-        another dict mapping all interdisciplinary department shortcodes to 
+        Returns a dict mapping all department names to department codes and
+        another dict mapping all interdisciplinary department shortcodes to
         department codes.
 
         Returns:
             At tuple of three dicts, DEPT:DT and Dept Name:DEPT.
         """
-        
+
         if os.path.exists('./cached_xml/SplashPage.xml'):
             page = html.parse('./cached_xml/SplashPage.xml')
         else:
@@ -139,10 +146,10 @@ class Bates(object):
             shortcode_dept_map = {}
             names_dept_map = {}
             dept_name_map = {}
-            for i in range(len(subj_name)):
-                names_dept_map[subj_name[i]] = subj_code[i]
+            for i, subj in enumerate(subj_name):
+                names_dept_map[subj] = subj_code[i]
                 shortcode_dept_map[subj_code_2[i]] = subj_code[i]
-                dept_name_map[subj_code[i]] = subj_name[i]
+                dept_name_map[subj_code[i]] = subj
             return shortcode_dept_map, names_dept_map, dept_name_map
 
 class Page(object):
@@ -180,7 +187,6 @@ class Page(object):
             pass
         with open('cached_xml/' + fname, 'w') as target:
             target.write(xml_file)
-        
 
     def parse(self):
         "create Courses out of all course divs within the page"
@@ -201,7 +207,7 @@ class Course(object):
 
     def __repr__(self):
         return '<Course {}, {}>'.format(self.code, self.start_year)
-    
+
     def __init__(self, parent_page, name, div_id, desc, program_tags, session):
         """
         Parses html course info into a this Course object.
@@ -289,8 +295,11 @@ class Course(object):
             else:
                 programs.append(Program(self, program_str))
         return programs
-        
+
     def merge(self):
+        """
+        Merger this code into the connected neo4j database.
+        """
         # ensure the course is present, has details
         cypher = """
         MERGE (n:Course {{code:'{code}'}})
@@ -327,33 +336,46 @@ class Course(object):
         return
 
     def merge_profs(self):
+        """
+        Merge any connected professors into the connected neo4j db.
+        """
         profs = self.parse_professors()
         for prof in profs:
             prof.merge()
             
     def merge_prereqs(self):
+        """
+        Merge any of this course's requirements into the connected neo4j db.
+        """
         prereqs = self.parse_prerequisites()
         if prereqs:
             for prereq in prereqs:
                 prereq.merge()
             
     def merge_program_membership(self):
+        """
+        Merge this course's membership relations into the connected neo4j db.
+        """
         programs = self.parse_program_membership()
         programs.append(Dept(self))
         for program in programs:
             program.merge()
 
 class Dept(object):
+    "Represents a link of a course belonging to a department"
     def __init__(self, course_inst):
         self.session = course_inst.session
         self.member = course_inst.code
         self.dept_code = course_inst.dept
         self.year = course_inst.start_year
-        
+
     def __repr__(self):
         return '<{} {}>'.format(self.dept_code, self.year)
-        
+
     def merge(self):
+        """
+        Merges this department-course relation into the connected neo4j db.
+        """
         # ensure the dept exists, and Dept, In_Dept have unique year arrays with
         # the current year
         # TODO : change In_Program, In_Dept to In
@@ -378,10 +400,10 @@ class Dept(object):
                 course_code=self.member
             )
         result = self.session.run(cypher)
-        
-    
-class Prerequisite(object):
+        return result
 
+class Prerequisite(object):
+    "Represents a course-requires-course relationship"
     def __init__(self, course_inst, required_course_code, label):
         self.requirer = course_inst.code
         self.required = required_course_code
@@ -390,6 +412,10 @@ class Prerequisite(object):
         self.session = course_inst.session
 
     def merge(self):
+        """
+        Merges this course-requires-course relationship into the connected
+        neo4j db.
+        """
         # ensure prereq node, link exists, and link.year is a non-empty array
         cypher = """
         MERGE (n:Course {{code:'{n}'}})
@@ -429,7 +455,7 @@ class Prerequisite(object):
         )
 
 class Program(object):
-    ""
+    "Represents a course-in-program relationship."
     def __init__(self, course_inst, program_name):
         self.year = course_inst.start_year
         self.course_code = course_inst.code
@@ -443,9 +469,9 @@ class Program(object):
             self.name,
             self.year
             )
-    
+
     def merge(self):
-        ""
+        "Merges this course-in-program relationship into the connected neo4j db"
         # ensure Program node, In_Program in db, and have unique .year arrays
         cypher = """
         MERGE (p:Program {{name:'{name}'}})
@@ -490,12 +516,13 @@ class Program(object):
         return
 
 class Concentration(Program):
+    "Represents a course-in-program relationship"
     def __init__(self, course_inst, conc_name, conc_code):
         Program.__init__(self, course_inst, conc_name)
         self.code = conc_code
         self.label = 'Concentration'
     def merge(self):
-        ""
+        "Merges the course-in-program relationship into the connected neo4j db."
         # ensure Concentration, In_Program exist with .year arrays
         cypher = """
         MERGE (con:Concentration {{name:'{name}'}})
@@ -519,22 +546,10 @@ class Concentration(Program):
         )
         # print(cypher)
         results = self.session.run(cypher)
-        # 
-        # cypher = """
-        # MATCH (con:Concentration )<-[i:In_Program]-(cou:Course )
-        # WHERE con.name = '{name}' AND cou.code ='{code}'
-        # UNWIND con.years + {year} AS conc_years
-        # UNWIND i.years + {year} AS membership_years
-        # WITH i, COLLECT(DISTINCT membership_years) as unique_years
-        # SET i.years = unique_years
-        # WITH con, COLLECT(DISTINCT conc_years) as unique_years
-        # SET con.years = unique_years
-        # """
-        # print(cypher)
-        # print([i for i in self.session.run(cypher)])
-        return
+        return results
 
 class Taught(object):
+    "Represents a teacher-taught-course relationship"
     def __init__(self, course_inst, prof_name):
         self.year = course_inst.start_year
         self.prof_name = prof_name
@@ -549,7 +564,7 @@ class Taught(object):
             )
     
     def merge(self):
-        ""
+        "Merges this teacher-course relationship into the connected neo4j db."
         # ensure prof, taught link exist & have unique, current .year arrays
         cypher = """
         MERGE (p:Prof {{name:'{name}'}})
@@ -566,38 +581,20 @@ class Taught(object):
                 SET t.years = t_unique_years
                 SET p.years = p_unique_years 
         """.format(
-                   code=self.course,
-                   name=self.prof_name,
-                   year=self.year
-                   )
+            code=self.course,
+            name=self.prof_name,
+            year=self.year
+        )
         records = [i for i in self.session.run(cypher)]
-        # cypher = """
-        # MATCH (p:Prof) -[t:Taught]-> (c:Course)
-        # WHERE p.name = '{name}' AND c.code = '{code}'
-        #     UNWIND t.years + {year} AS taught_years
-        #     UNWIND p.years + {year} AS prof_years
-        # WITH p,
-        #     t,
-        #     COLLECT(DISTINCT taught_years) AS t_unique_years,
-        #     COLLECT(DISTINCT prof_years) AS p_unique_years
-        #         SET t.years = t_unique_years
-        # SET p.years = p_unique_years
-        # """.format(
-        #     name=self.prof_name,
-        #     code=self.course,
-        #     year=self.year
-        # )
-        # print(cypher)
-        # self.session.run(cypher)
-        return
+        return records
+
 #%%
-def get_xml_year(xml_filename):
-    return int(xml_filename[::-1][4:8][::-1])
+get_xml_year = lambda(xml_filename): int(xml_filename[::-1][4:8][::-1])
 
 if __name__ == "__main__":
     if os.getcwd().split('/')[::-1][0] != 'BatesGraph':
-        os.chdir('ProgrammingProjects/BatesGraph')
-#        raise FileNotFoundError('Not in project directory')
+        os.chdir('BatesGraph')
+        # will raise an informative error if not in the correct directory
     if 'USR' not in dir():
         USR = input('username: ')
         PWD = input('password: ')
@@ -619,43 +616,35 @@ if __name__ == "__main__":
             course.merge_profs()
             course.merge_prereqs()
             course.merge_program_membership()
-#%%
-#%%
-os.chdir('ProgrammingProjects/BatesGraph')
-#%%
-if 'USR' not in dir():
-    USR = input('username: ')
-    PWD = input('password: ')
-DRIVER = GraphDatabase.driver(
-    "bolt://localhost",
-    auth=basic_auth(USR, PWD)
-)
-SESSION = DRIVER.session()
-BATES = Bates()
-cached_pages = os.listdir('./cached_xml')
-cached_pages = [i for i in cached_pages if i[::-1][4:8].isnumeric()]
-cached_pages.sort(key=lambda i: int(i[::-1][4:8][::-1]))
-#%%
-p = Page('&a=renderDept&d=WGST', '?s=1097')
-p.parse()
-c = p.courses[0]
-print(c)
-print(c.parse_professors())
-#%%
-c.merge()
-#%%
-p = c.parse_professors()[0]
-p.merge()
-#%%
-c.merge_profs()
-#%%
-programs = c.parse_program_membership()
-p = programs[0]
-#c.merge_program_membership()
-#%%
-print(c.parse_requirements())
-#%%
-PROG = pb.ProgressBar()
-for dept, year in PROG(BATES.page_query_tuples):
-    PAGE = Page(dept, year)
-    #%%
+
+    CACHED_PAGES = os.listdir('./cached_xml')
+    CACHED_PAGES = [i for i in CACHED_PAGES if i[::-1][4:8].isnumeric()]
+    CACHED_PAGES.sort(key=lambda fname: int(fname[::-1][4:8][::-1]))
+    # sorted by year in filename
+    PROG = pb.ProgressBar()
+    for dept, year in PROG(BATES.page_query_tuples):
+        PAGE = Page(dept, year)
+#%% old tests
+# p = Page('&a=renderDept&d=WGST', '?s=1097')
+# p.parse()
+# c = p.courses[0]
+# print(c)
+# print(c.parse_professors())
+# #%%
+# c.merge()
+# #%%
+# p = c.parse_professors()[0]
+# p.merge()
+# #%%
+# c.merge_profs()
+# #%%
+# programs = c.parse_program_membership()
+# p = programs[0]
+# #c.merge_program_membership()
+# #%%
+# print(c.parse_requirements())
+# #%%
+# PROG = pb.ProgressBar()
+# for dept, year in PROG(BATES.page_query_tuples):
+#     PAGE = Page(dept, year)
+#     #%%
