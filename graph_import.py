@@ -237,17 +237,19 @@ class Course(object):
             requirements = []
             reqs = self.desc.split('Prerequisite(s):')[1].split('.')[0].strip()
             current_dept = self.dept
-            # remove all punctuation from the str describing the prerequisites
-            translator = str.maketrans({k:' ' for k in string.punctuation})
+            # remove all punctuation except /s from the str describing the
+            # prerequisites
+            not_slash = string.punctuation.replace('/', '')
+            translator = str.maketrans({k:' ' for k in not_slash})
             reqs = reqs.translate(translator)
             reqs = (i for i in reqs.split())
             count = 0
             group = {'type':None, 'courses':[]}
             for chunk in reqs:
-                if chunk.isupper() and chunk.isalpha() and len(chunk) > 2:
-                    # this is a department code
+                if re.match(r'([A-Z]{1,4}|[A-Z]/[A-Z])', chunk):
+                    # this is a department code like MATH
                     current_dept = chunk
-                elif len(chunk) >= 3 and chunk[1].isnumeric():
+                elif re.match(r'^[a-z]?[0-9]{2, 3}[a-z]?$', chunk):
                     # this is a course number
                     group['courses'].append(current_dept + ' ' + chunk)
                     if group['type']:
@@ -256,7 +258,8 @@ class Course(object):
                             req = Prerequisite(self, course, group['type'])
                             requirements.append(req)
                         group = {'type':None, 'courses':[]}
-                elif chunk.lower() == 'or':
+                        
+                elif re.match('(?i)or', chunk):
                     group['type'] = chunk + str(count)
                     count += 1
             for course in group['courses']:
